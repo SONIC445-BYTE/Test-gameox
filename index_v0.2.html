@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Hand Shooter - Ultimate</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; padding: 0; background-color: #000; overflow: hidden; font-family: 'Courier New', sans-serif; }
+        canvas { display: block; width: 100vw; height: 100vh; transform: scaleX(-1); } /* Mirror Effect */
+
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        #score-board { position: absolute; top: 20px; left: 20px; color: #0f0; font-size: 24px; font-weight: bold; text-shadow: 0 0 5px #0f0; }
+        #lives-board { position: absolute; top: 20px; right: 20px; color: red; font-size: 24px; text-shadow: 0 0 5px red; }
+
+        #start-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85); display: flex; flex-direction: column;
+            justify-content: center; align-items: center; pointer-events: auto; z-index: 10;
+        }
+
+        h1 { color: #00ffff; text-shadow: 0 0 10px #00ffff; text-align: center; margin-bottom: 10px; }
+        p { color: #aaa; margin: 5px 0; font-size: 14px; text-align: center; }
+        .instructions { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 8px; margin: 15px 0; text-align: left;}
+
+        button {
+            padding: 15px 40px; font-size: 22px; font-weight: bold; color: #000;
+            background: linear-gradient(45deg, #00ffcc, #00ffff);
+            border: none; border-radius: 30px; cursor: pointer;
+            box-shadow: 0 0 15px #00ffcc; transition: transform 0.2s;
+        }
+        button:active { transform: scale(0.95); }
+
+        .hidden { display: none !important; }
+        video { display: none; } /* Hide raw video feed */
+    </style>
+</head>
+<body>
+
+    <video id="input_video"></video>
+    <canvas id="output_canvas"></canvas>
+
+    <div id="ui-layer">
+        <div id="score-board">Score: 0</div>
+        <div id="lives-board">❤❤❤</div>
+    </div>
+
+    <div id="start-screen">
+        <h1>Hand Shooter<br>Ultimate</h1>
+        <div id="highscore-display" style="color: yellow; font-size: 18px; margin-bottom: 10px;">Best Score: 0</div>
+
+        <div class="instructions">
+            <p>🤌 <strong>PINCH</strong> to Shoot</p>
+            <p>✋ <strong>OPEN PALM</strong> for Shield</p>
+        </div>
+
+        <button onclick="startGame()">START MISSION</button>
+    </div>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const scoreBoard = document.getElementById('score-board');
+    const livesBoard = document.getElementById('lives-board');
+    const startScreen = document.getElementById('start-screen');
+    const highScoreDisplay = document.getElementById('highscore-display');
+
+    let width, height;
+    let score = 0;
+    let lives = 3;
+    let gameActive = false;
+    let lastShotTime = 0;
+    let difficultySpeed = 0;
+
+    // Upgrade 4: High Score
+    let highScore = localStorage.getItem('handShooterHighScore') || 0;
+    highScoreDisplay.innerText = "Best Score: " + highScore;
+
+    // Game Objects
+    let bullets = [];
+    let enemies = [];
+    let particles = [];
+    let stars = []; // Upgrade 5: Starfield
+
+    // Hand Tracking
+    let handX = 0, handY = 0;
+    let isPinching = false;
+    let isShielding = false; // Upgrade 3: Shield State
+
+    // Audio Context
+    let audioCtx;
+
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvasElement.width = width;
+        canvasElement.height = height;
+        initStars(); // Reset stars on resize
+    }
+    window.addEventListener('resize', resize);
+
+    // --- UPGRADE 5: STARFIELD BACKGROUND ---
+    function initStars() {
+        stars = [];
+        for(let i=0; i<60; i++) {
+            stars.push({
+                x: Math.random() * width,
+                y: Math.random() * height,
+                speed: Math.random() * 5 + 2,
+                size: Math.random() * 2 + 0.5
+            });
+        }
+    }
+
+    // --- SOUND ENGINE ---
+    function initAudio() {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+
+    function playSound(type) {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        osc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        const now = audioCtx.currentTime;
+        if (type === 'shoot') {
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(400, now);
+            osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+            gainNode.gain.setValueAtTime(0.05, now);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+            osc.start(now);
+            osc.stop(now + 0.1);
+        } else if (type === 'explosion') {
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(100, now);
+            osc.frequency.exponentialRampToValueAtTime(10, now + 0.3);
+            gainNode.gain.setValueAtTime(0.1, now);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+            osc.start(now);
+            osc.stop(now + 0.3);
+        } else if (type === 'shield') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(200, now);
+            osc.frequency.linearRampToValueAtTime(600, now + 0.2);
+            gainNode.gain.setValueAtTime(0.05, now);
+            gainNode.gain.linearRampToValueAtTime(0, now + 0.2);
+            osc.start(now);
+            osc.stop(now + 0.2);
+        }
+    }
+
+    // --- GAME LOGIC ---
+    function spawnEnemy() {
+        const size = 30;
+        const x = Math.random() * (width - 60) + 30;
+        enemies.push({ x: x, y: -50, size: size, speed: 2 + Math.random() * 3 + difficultySpeed });
+    }
+
+    function createExplosion(x, y, color = '255, 165, 0') {
+        for (let i = 0; i < 10; i++) {
+            particles.push({
+                x: x, y: y,
+                vx: (Math.random() - 0.5) * 12,
+                vy: (Math.random() - 0.5) * 12,
+                life: 1.0,
+                color: color
+            });
+        }
+    }
+
+    function updateGame() {
+        if (!gameActive) return;
+
+        // 1. Draw Starfield Background (Upgrade 5)
+        canvasCtx.fillStyle = '#000'; // Solid black to clear previous frame
+        canvasCtx.fillRect(0, 0, width, height);
+
+        canvasCtx.fillStyle = '#fff';
+        for(let s of stars) {
+            s.y += s.speed; // Move star down
+            if(s.y > height) { s.y = 0; s.x = Math.random() * width; } // Loop
+            canvasCtx.beginPath();
+            canvasCtx.arc(s.x, s.y, s.size, 0, Math.PI*2);
+            canvasCtx.fill();
+        }
+
+        // 2. Handle Actions
+        // Shooting (Pinch) - Only if NOT shielding
+        if (isPinching && !isShielding && Date.now() - lastShotTime > 200) {
+            bullets.push({ x: handX, y: handY });
+            playSound('shoot');
+            if (navigator.vibrate) navigator.vibrate(20); // Haptic
+            lastShotTime = Date.now();
+        }
+
+        // 3. Update Bullets
+        canvasCtx.fillStyle = '#0f0';
+        canvasCtx.shadowBlur = 10;
+        canvasCtx.shadowColor = '#0f0';
+        for (let i = bullets.length - 1; i >= 0; i--) {
+            let b = bullets[i];
+            b.y -= 15;
+            canvasCtx.beginPath();
+            canvasCtx.arc(b.x, b.y, 6, 0, Math.PI * 2);
+            canvasCtx.fill();
+            if (b.y < 0) bullets.splice(i, 1);
+        }
+        canvasCtx.shadowBlur = 0; // Reset glow
+
+        // 4. Update Enemies
+        if (Math.random() < 0.02 + (difficultySpeed * 0.005)) spawnEnemy();
+
+        for (let i = enemies.length - 1; i >= 0; i--) {
+            let e = enemies[i];
+            e.y += e.speed;
+
+            // Draw Enemy
+            canvasCtx.fillStyle = '#ff0055';
+            canvasCtx.beginPath();
+            canvasCtx.arc(e.x, e.y, e.size, 0, Math.PI * 2);
+            canvasCtx.fill();
+            // Angry Eyes
+            canvasCtx.fillStyle = 'black';
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(e.x - 15, e.y - 10); canvasCtx.lineTo(e.x - 5, e.y); canvasCtx.lineTo(e.x - 15, e.y + 5);
+            canvasCtx.moveTo(e.x + 15, e.y - 10); canvasCtx.lineTo(e.x + 5, e.y); canvasCtx.lineTo(e.x + 15, e.y + 5);
+            canvasCtx.fill();
+
+            // Collision: Bullet vs Enemy
+            let hit = false;
+            for (let j = bullets.length - 1; j >= 0; j--) {
+                let b = bullets[j];
+                let dist = Math.hypot(e.x - b.x, e.y - b.y);
+                if (dist < e.size + 5) {
+                    bullets.splice(j, 1);
+                    hit = true;
+                    break;
+                }
+            }
+
+            // Upgrade 3: Shield Collision
+            if (isShielding) {
+                let distHand = Math.hypot(e.x - handX, e.y - handY);
+                if (distHand < e.size + 70) { // Shield radius is ~60-70
+                    hit = true;
+                    playSound('shield');
+                }
+            }
+
+            if (hit) {
+                createExplosion(e.x, e.y, isShielding && !isPinching ? '0, 255, 255' : '255, 165, 0'); // Blue boom for shield
+                playSound('explosion');
+                if (navigator.vibrate) navigator.vibrate([30, 10, 30]);
+                score += 10;
+                scoreBoard.innerText = "Score: " + score;
+                if (score % 100 === 0) difficultySpeed += 1;
+                enemies.splice(i, 1);
+                continue;
+            }
+
+            // Game Over Check
+            if (e.y > height) {
+                lives--;
+                livesBoard.innerText = "❤".repeat(lives);
+                if (navigator.vibrate) navigator.vibrate(200);
+                enemies.splice(i, 1);
+                if (lives <= 0) gameOver();
+            }
+        }
+
+        // 5. Update Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life -= 0.05;
+            canvasCtx.fillStyle = `rgba(${p.color}, ${p.life})`;
+            canvasCtx.beginPath();
+            canvasCtx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            canvasCtx.fill();
+            if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // 6. Draw Hand Cursor & Shield (Upgrade 3)
+
+        if (isShielding) {
+            // Draw Blue Shield
+            canvasCtx.shadowBlur = 20;
+            canvasCtx.shadowColor = '#00ffff';
+            canvasCtx.strokeStyle = `rgba(0, 255, 255, 0.7)`;
+            canvasCtx.lineWidth = 5;
+            canvasCtx.beginPath();
+            canvasCtx.arc(handX, handY, 60, 0, Math.PI * 2);
+            canvasCtx.stroke();
+
+            // Inner Shield
+            canvasCtx.fillStyle = `rgba(0, 255, 255, 0.2)`;
+            canvasCtx.fill();
+            canvasCtx.shadowBlur = 0;
+        } else {
+            // Draw Target Crosshair
+            const cursorColor = isPinching ? '#ff0000' : '#00ff00';
+            canvasCtx.strokeStyle = cursorColor;
+            canvasCtx.lineWidth = 3;
+            canvasCtx.beginPath();
+            canvasCtx.arc(handX, handY, 20, 0, Math.PI * 2);
+            canvasCtx.stroke();
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(handX - 30, handY); canvasCtx.lineTo(handX + 30, handY);
+            canvasCtx.moveTo(handX, handY - 30); canvasCtx.lineTo(handX, handY + 30);
+            canvasCtx.stroke();
+        }
+    }
+
+    function gameOver() {
+        gameActive = false;
+
+        // Upgrade 4: Check & Save High Score
+        if (score > highScore) {
+            highScore = score;
+            localStorage.setItem('handShooterHighScore', highScore);
+            document.querySelector('h1').innerText = "NEW HIGH SCORE!";
+        } else {
+            document.querySelector('h1').innerText = "GAME OVER";
+        }
+
+        highScoreDisplay.innerText = "Best Score: " + highScore;
+        startScreen.classList.remove('hidden');
+        document.querySelector('button').innerText = "RETRY MISSION";
+    }
+
+    function startGame() {
+        initAudio();
+        resize(); // Re-init stars
+        startScreen.classList.add('hidden');
+        score = 0;
+        lives = 3;
+        difficultySpeed = 0;
+        enemies = [];
+        bullets = [];
+        scoreBoard.innerText = "Score: 0";
+        livesBoard.innerText = "❤❤❤";
+        gameActive = true;
+    }
+
+    // --- MEDIAPIPE LOGIC ---
+    function onResults(results) {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+            const indexTip = landmarks[8];
+            const thumbTip = landmarks[4];
+
+            // 1. Calculate Hand Position
+            handX = (1 - indexTip.x) * width;
+            handY = indexTip.y * height;
+
+            // 2. Pinch Detection (For Shooting)
+            const pinchDist = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+            isPinching = pinchDist < 0.05;
+
+            // 3. Upgrade 3: Open Palm Detection (For Shield)
+            // Logic: If tips of Middle, Ring, and Pinky are ABOVE their knuckles (lower Y value)
+            const tips = [12, 16, 20]; // Middle, Ring, Pinky
+            const knuckles = [10, 14, 18];
+            let fingersUp = 0;
+
+            for(let i=0; i<tips.length; i++) {
+                if(landmarks[tips[i]].y < landmarks[knuckles[i]].y) {
+                    fingersUp++;
+                }
+            }
+            // If 3 fingers are up + Index is up (implied) -> Shield
+            // We use a looser check: if index isn't pinching and other fingers are up
+            isShielding = (fingersUp >= 3) && !isPinching;
+        }
+        requestAnimationFrame(updateGame);
+    }
+
+    const hands = new Hands({locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }});
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({image: videoElement});
+        },
+        width: 1280,
+        height: 720
+    });
+
+    camera.start();
+
+</script>
+</body>
+</html>
