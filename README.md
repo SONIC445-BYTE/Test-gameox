@@ -62,4 +62,4 @@ Want to help? Check out the issues or submit a PR with your enhancements!
 ## ⚠️ Medical Disclaimer
 Project GAMEOX is intended for research and entertainment purposes only. The screenings provided are based on experimental algorithms and do NOT constitute a clinical diagnosis. Always consult a medical professional for health concerns.
 
-Developed with ❤️ for the future of Interactive Health.
+Developed with ❤️ for the future of Interactive Health. And it must be visible in repo
